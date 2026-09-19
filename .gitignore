@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+/build/
+/dist/
+data/
+*.parquet
+*.tif
+*.tiff
+
+# Web artifacts
+web/node_modules/
+web/dist/
+web/.next/
+web/.vinext/
+web/.wrangler/
+web/outputs/
+web/work/
+
+

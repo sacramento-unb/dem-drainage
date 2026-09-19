@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dem-drainage-whitebox"
+version = "0.1.0"
+description = "Extract Hack-ordered drainage networks from folders of DEM tiles using WhiteboxTools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "DigiFarmz"}]
+dependencies = [
+  "fastapi>=0.116,<1",
+  "geopandas>=1.0,<2",
+  "pillow>=11,<13",
+  "pyarrow>=19",
+  "python-multipart>=0.0.20",
+  "rasterio>=1.4,<2",
+  "uvicorn[standard]>=0.35,<1",
+  "whitebox>=2.3.6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+dem-drainage = "dem_drainage.cli:main"
+dem-drainage-web = "dem_drainage.api:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

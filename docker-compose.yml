@@ -1,0 +1,54 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dem-drainage-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DEM_DRAINAGE_HOST=0.0.0.0
+      - DEM_DRAINAGE_PORT=8000
+      - DEM_DRAINAGE_JOB_DIR=/data/jobs
+      - DEM_DRAINAGE_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://0.0.0.0:3000,*
+    volumes:
+      - dem_jobs:/data/jobs
+      - ./data:/data/local
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=http://localhost:8000
+    container_name: dem-drainage-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - PORT=3000
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dem-drainage-cli
+    profiles:
+      - cli
+    entrypoint: ["dem-drainage"]
+    volumes:
+      - ./data:/data
+
+volumes:
+  dem_jobs:
