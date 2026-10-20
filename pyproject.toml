@@ -9,7 +9,7 @@ description = "Extract Hack-ordered drainage networks from folders of DEM tiles 
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [{name = "DigiFarmz"}]
+authors = [{name = "Vitor Sacramento"}]
 dependencies = [
   "fastapi>=0.116,<1",
   "geopandas>=1.0,<2",
