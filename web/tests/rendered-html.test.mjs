@@ -9,12 +9,12 @@ test("client bundle and manifest exist after build", async () => {
   assert.ok(manifest, "Manifest should be valid JSON");
 });
 
-test("page component contains Drainage Studio UI elements", async () => {
+test("page component contains Dossel Ambiental UI elements", async () => {
   const pageSrc = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  assert.match(pageSrc, /Drainage Studio/);
+  assert.match(pageSrc, /Dossel Ambiental/);
   assert.match(pageSrc, /MapViewer/);
-  assert.match(pageSrc, /Inspect/);
-  assert.match(pageSrc, /Hack hierarchy/);
+  assert.match(pageSrc, /Visualizar/);
+  assert.match(pageSrc, /Ordem Hack/);
 });
 
 test("map component has Leaflet and GeoParquet vector handling", async () => {

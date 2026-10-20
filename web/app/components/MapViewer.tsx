@@ -15,7 +15,7 @@ function FitBounds({ bounds }: { bounds: LatLngBoundsExpression }) {
   return null;
 }
 
-const colours = ["#163e52", "#29788e", "#49a1a9", "#85beb8", "#d5b169", "#cc7658"];
+const colours = ["#1a3c2f", "#2a5c3f", "#3d7a5f", "#8fbf8f", "#d3b56c", "#c4785c"];
 
 export default function MapViewer({ apiBase, jobId, artifact }: { apiBase: string; jobId: string; artifact: Artifact }) {
   const [info, setInfo] = useState<PreviewInfo | null>(null);
@@ -26,12 +26,12 @@ export default function MapViewer({ apiBase, jobId, artifact }: { apiBase: strin
     if (!artifact.info_url) return;
     const controller = new AbortController();
     fetch(`${apiBase}${artifact.info_url}`, { signal: controller.signal })
-      .then((response) => { if (!response.ok) throw new Error("Preview metadata is unavailable."); return response.json(); })
+      .then((response) => { if (!response.ok) throw new Error("Não foi possível carregar os metadados da camada."); return response.json(); })
       .then(async (next: PreviewInfo) => {
         setInfo(next);
         if (next.kind === "vector") {
           const response = await fetch(`${apiBase}${next.preview_url}`, { signal: controller.signal });
-          if (!response.ok) throw new Error("Vector preview is unavailable.");
+          if (!response.ok) throw new Error("Não foi possível carregar a camada vetorial.");
           setGeojson(await response.json());
         }
       })
@@ -43,8 +43,8 @@ export default function MapViewer({ apiBase, jobId, artifact }: { apiBase: strin
 
   const bounds = useMemo(() => (info?.bounds || [[-20, -30], [20, 30]]) as LatLngBoundsExpression, [info]);
 
-  if (error) return <div className="map-state error"><TriangleAlert size={22} /><strong>Could not draw this layer</strong><span>{error}</span></div>;
-  if (!info || (info.kind === "vector" && !geojson)) return <div className="map-state"><LoaderCircle className="spin" size={24} /><strong>Building preview</strong><span>Reprojecting the selected layer for the map…</span></div>;
+  if (error) return <div className="map-state error"><TriangleAlert size={22} /><strong>Não foi possível exibir esta camada</strong><span>{error}</span></div>;
+  if (!info || (info.kind === "vector" && !geojson)) return <div className="map-state"><LoaderCircle className="spin" size={24} /><strong>Carregando visualização</strong><span>Preparando a camada para o mapa…</span></div>;
 
   function lineStyle(feature?: Feature): PathOptions {
     const order = Number(feature?.properties?.hack_order || 1);
@@ -59,10 +59,10 @@ export default function MapViewer({ apiBase, jobId, artifact }: { apiBase: strin
       {info.kind === "vector" && geojson && <GeoJSON data={geojson} style={lineStyle} onEachFeature={(feature, layer) => {
         const order = feature.properties?.hack_order;
         const length = Number(feature.properties?.length || 0);
-        layer.bindPopup(`<strong>Hack order ${order}</strong><br/>Length: ${length.toLocaleString(undefined, { maximumFractionDigits: 1 })} map units`);
+        layer.bindPopup(`<strong>Ordem Hack ${order}</strong><br/>Comprimento: ${length.toLocaleString("pt-BR", { maximumFractionDigits: 1 })} unidades do mapa`);
       }} />}
     </MapContainer>
-    {info.kind === "vector" && <div className="map-legend"><strong>Hack order</strong><span><i style={{ background: colours[0] }} />1 · main trunk</span><span><i style={{ background: colours[1] }} />2 · tributaries</span><span><i style={{ background: colours[2] }} />3</span><span><i style={{ background: colours[3] }} />4+</span></div>}
+    {info.kind === "vector" && <div className="map-legend"><strong>Ordem Hack</strong><span><i style={{ background: colours[0] }} />1 · canal principal</span><span><i style={{ background: colours[1] }} />2 · tributários</span><span><i style={{ background: colours[2] }} />3</span><span><i style={{ background: colours[3] }} />4+</span></div>}
     <div className="layer-chip">{info.kind === "vector" ? "GeoParquet" : "GeoTIFF"}</div>
   </div>;
 }

@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pytest
@@ -54,35 +55,53 @@ def test_pipeline_uses_hack_order_and_vectorizes_ordered_raster(tmp_path):
     write_dem(cfg.input_dir / "tile.tif")
     runner = RecordingRunner()
 
-    result = DrainagePipeline(cfg, runner).execute()
+    result = DrainagePipeline(cfg, runner).execute()[0]
 
     names = [call[0] for call in runner.calls]
     assert names == [
-        "BreachDepressionsLeastCost",
+        "BreachDepressions",
         "D8Pointer",
         "D8FlowAccumulation",
         "ExtractStreams",
         "HackStreamOrder",
     ]
-    assert result.drainage_geoparquet.name == "drainage_hack_order.parquet"
+    assert result.drainage_geoparquet.name == "tile_drainage_hack_order.parquet"
 
 
-def test_multiple_tiles_are_mosaiced_without_losing_edge_pixels_or_crs(tmp_path):
+def test_multiple_tiles_are_processed_independently(tmp_path):
     cfg = config(tmp_path)
     write_dem(cfg.input_dir / "tile_1.tif", west=0)
     write_dem(cfg.input_dir / "tile_2.tif", west=4)
     runner = RecordingRunner()
-    runner.dry_run = False
 
-    result_path = cfg.output_dir / "dem_mosaic.tif"
-    cfg.output_dir.mkdir()
-    result = DrainagePipeline(cfg, runner)._create_mosaic(
-        [cfg.input_dir / "tile_1.tif", cfg.input_dir / "tile_2.tif"], result_path
+    results = DrainagePipeline(cfg, runner).execute()
+
+    assert [result.source_dem.name for result in results] == ["tile_1.tif", "tile_2.tif"]
+    assert [result.drainage_geoparquet.name for result in results] == [
+        "tile_1_drainage_hack_order.parquet",
+        "tile_2_drainage_hack_order.parquet",
+    ]
+    dem_args = [
+        argument
+        for tool, arguments, _ in runner.calls
+        if tool == "BreachDepressions"
+        for argument in arguments
+        if argument.startswith("--dem=")
+    ]
+    assert dem_args == [
+        f"--dem={cfg.input_dir / 'tile_1.tif'}",
+        f"--dem={cfg.input_dir / 'tile_2.tif'}",
+    ]
+    assert all(
+        "--fill_pits" in arguments
+        for tool, arguments, _ in runner.calls
+        if tool == "BreachDepressions"
     )
-
-    with rasterio.open(result) as mosaic:
-        assert (mosaic.width, mosaic.height) == (8, 4)
-        assert mosaic.crs == rasterio.CRS.from_epsg(31983)
+    assert not any(
+        "mosaic" in argument
+        for _, arguments, _ in runner.calls
+        for argument in arguments
+    )
 
 
 def test_output_folder_is_excluded_from_recursive_discovery(tmp_path):
@@ -98,15 +117,45 @@ def test_invalid_threshold_is_rejected(tmp_path):
     cfg = config(tmp_path, threshold=0)
     write_dem(cfg.input_dir / "source.tif")
 
-    with pytest.raises(DrainageError, match="threshold"):
+    with pytest.raises(DrainageError, match="limiar"):
         DrainagePipeline(cfg, RecordingRunner()).execute()
+
+
+def test_zero_cells_without_nodata_are_normalized(tmp_path):
+    cfg = config(tmp_path)
+    source = cfg.input_dir / "source.tif"
+    values = np.array([[0, 0, 0], [0, 12, 13], [0, 14, 15]], dtype="int16")
+    with rasterio.open(
+        source,
+        "w",
+        driver="GTiff",
+        width=3,
+        height=3,
+        count=1,
+        dtype="int16",
+        crs="EPSG:31983",
+        transform=from_origin(0, 3, 1, 1),
+    ) as dataset:
+        dataset.write(values, 1)
+
+    runner = RecordingRunner()
+    runner.dry_run = False
+    prepared, temp_dir = DrainagePipeline(cfg, runner)._prepare_dem(source)
+    try:
+        with rasterio.open(prepared) as dataset:
+            assert dataset.nodata == -32768
+            assert dataset.read(1)[0, 0] == -32768
+            assert dataset.read(1)[2, 2] == 15
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir)
 
 
 def test_area_threshold_requires_projected_crs(tmp_path):
     cfg = config(tmp_path, threshold_units="area")
     write_dem(cfg.input_dir / "source.tif", crs="EPSG:4326")
 
-    with pytest.raises(DrainageError, match="projected CRS"):
+    with pytest.raises(DrainageError, match="SRC projetado"):
         DrainagePipeline(cfg, RecordingRunner()).execute()
 
 
@@ -184,10 +233,9 @@ def test_pipeline_end_to_end_with_whitebox_tools(tmp_path):
         output_dir=output_dir,
         threshold=20,
         threshold_units="cells",
-        breach_distance=10,
     )
     runner = WhiteboxRunner(executable, verbose=False)
-    result = DrainagePipeline(cfg, runner).execute()
+    result = DrainagePipeline(cfg, runner).execute()[0]
 
     assert result.drainage_geoparquet.is_file()
     assert result.hack_order_raster.is_file()

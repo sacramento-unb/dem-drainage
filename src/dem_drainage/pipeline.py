@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+import numpy as np
 import rasterio
 from rasterio.crs import CRS
-from rasterio.merge import merge
 
 from .vectorize import VectorizationError, streams_to_geoparquet
 
 
 class DrainageError(RuntimeError):
-    """Raised when inputs are invalid or a WhiteboxTools operation fails."""
+    """Erro para entradas inválidas ou falhas em operações do WhiteboxTools."""
+
+
+class EmptyDEMError(DrainageError):
+    """Erro para arquivos sem células de elevação utilizáveis."""
 
 
 @dataclass(frozen=True)
@@ -26,32 +32,22 @@ class DrainageConfig:
     output_dir: Path
     threshold: float = 10_000.0
     threshold_units: str = "cells"
-    breach_distance: int = 100
-    max_breach_cost: float | None = None
     fill_remaining_depressions: bool = True
-    minimize_breach_distance: bool = True
     min_stream_length: float | None = None
     recursive: bool = False
     patterns: tuple[str, ...] = ("*.tif", "*.tiff")
-    mosaic_memory_mb: int = 256
     resume: bool = False
     keep_intermediates: bool = True
 
     def validate(self) -> None:
         if not self.input_dir.is_dir():
-            raise DrainageError(f"DEM folder does not exist: {self.input_dir}")
+            raise DrainageError(f"A pasta dos DEMs não existe: {self.input_dir}")
         if self.threshold <= 0:
-            raise DrainageError("Stream threshold must be greater than zero.")
+            raise DrainageError("O limiar dos canais deve ser maior que zero.")
         if self.threshold_units not in {"cells", "area"}:
-            raise DrainageError("threshold_units must be 'cells' or 'area'.")
-        if self.breach_distance <= 0:
-            raise DrainageError("breach_distance must be greater than zero.")
-        if self.max_breach_cost is not None and self.max_breach_cost <= 0:
-            raise DrainageError("max_breach_cost must be greater than zero.")
+            raise DrainageError("A unidade do limiar deve ser 'cells' ou 'area'.")
         if self.min_stream_length is not None and self.min_stream_length <= 0:
-            raise DrainageError("min_stream_length must be greater than zero.")
-        if self.mosaic_memory_mb < 16:
-            raise DrainageError("mosaic_memory_mb must be at least 16.")
+            raise DrainageError("O comprimento mínimo dos canais deve ser maior que zero.")
 
 
 @dataclass(frozen=True)
@@ -62,12 +58,12 @@ class PipelineResult:
     flow_accumulation: Path
     d8_pointer: Path
     breached_dem: Path
-    mosaic: Path
+    source_dem: Path
     manifest: Path
 
 
 class WhiteboxRunner:
-    """Small, dependency-free adapter for the official WhiteboxTools CLI."""
+    """Adaptador pequeno e sem dependências para a CLI oficial do WhiteboxTools."""
 
     def __init__(
         self,
@@ -109,8 +105,8 @@ class WhiteboxRunner:
                 return path
 
         raise DrainageError(
-            "WhiteboxTools executable not found. Pass --whitebox-exe, set "
-            "WHITEBOX_TOOLS_EXE, or place whitebox_tools on PATH."
+            "Executável do WhiteboxTools não encontrado. Informe --whitebox-exe, defina "
+            "WHITEBOX_TOOLS_EXE ou coloque whitebox_tools no PATH."
         )
 
     def run(self, tool: str, arguments: Sequence[str], *, cwd: Path) -> None:
@@ -134,12 +130,12 @@ class WhiteboxRunner:
         except subprocess.CalledProcessError as exc:
             detail = f"\n{exc.stdout.strip()}" if exc.stdout else ""
             raise DrainageError(
-                f"WhiteboxTools {tool} failed with exit code {exc.returncode}.{detail}"
+                f"WhiteboxTools {tool} falhou com código de saída {exc.returncode}.{detail}"
             ) from exc
 
 
 def discover_dems(config: DrainageConfig) -> list[Path]:
-    """Return stable, unique DEM paths without ingesting our own output folder."""
+    """Retorna caminhos DEM estáveis e únicos sem incluir a própria pasta de saída."""
     output = config.output_dir.resolve()
     found: dict[Path, None] = {}
     for pattern in config.patterns:
@@ -153,46 +149,27 @@ def discover_dems(config: DrainageConfig) -> list[Path]:
     return sorted(found, key=lambda path: str(path).casefold())
 
 
-def validate_dem_stack(inputs: Sequence[Path], threshold_units: str) -> CRS:
-    """Validate the assumptions required by a lossless elevation mosaic."""
-    reference_crs: CRS | None = None
-    reference_dtype: str | None = None
-    reference_resolution: tuple[float, float] | None = None
-    for path in inputs:
-        try:
-            with rasterio.open(path) as dataset:
-                if dataset.count != 1:
-                    raise DrainageError(f"DEM must have exactly one band: {path}")
-                if dataset.crs is None:
-                    raise DrainageError(f"DEM has no coordinate reference system: {path}")
-                if dataset.transform.b != 0 or dataset.transform.d != 0:
-                    raise DrainageError(f"Rotated DEM grids are not supported: {path}")
-                resolution = (abs(dataset.res[0]), abs(dataset.res[1]))
-                if reference_crs is None:
-                    reference_crs = dataset.crs
-                    reference_dtype = dataset.dtypes[0]
-                    reference_resolution = resolution
-                elif dataset.crs != reference_crs:
-                    raise DrainageError(f"DEM CRS differs from the first tile: {path}")
-                elif dataset.dtypes[0] != reference_dtype:
-                    raise DrainageError(f"DEM data type differs from the first tile: {path}")
-                elif any(
-                    abs(a - b) > max(abs(a), abs(b), 1.0) * 1e-9
-                    for a, b in zip(resolution, reference_resolution or resolution)
-                ):
-                    raise DrainageError(f"DEM resolution differs from the first tile: {path}")
-        except DrainageError:
-            raise
-        except rasterio.errors.RasterioError as exc:
-            raise DrainageError(f"Cannot read DEM {path}: {exc}") from exc
+def validate_dem(path: Path, threshold_units: str) -> CRS:
+    """Valida um arquivo antes de executar o processamento."""
+    try:
+        with rasterio.open(path) as dataset:
+            if dataset.count != 1:
+                raise DrainageError(f"O DEM deve ter exatamente uma banda: {path}")
+            if dataset.crs is None:
+                raise DrainageError(f"O DEM não possui sistema de referência de coordenadas: {path}")
+            if dataset.transform.b != 0 or dataset.transform.d != 0:
+                raise DrainageError(f"Grades DEM rotacionadas não são suportadas: {path}")
+            crs = dataset.crs
+    except DrainageError:
+        raise
+    except rasterio.errors.RasterioError as exc:
+        raise DrainageError(f"Não foi possível ler o DEM {path}: {exc}") from exc
 
-    if reference_crs is None:
-        raise DrainageError("No readable DEMs were supplied.")
-    if threshold_units == "area" and not reference_crs.is_projected:
+    if threshold_units == "area" and not crs.is_projected:
         raise DrainageError(
-            "--threshold-area requires a projected CRS; use --threshold-cells for geographic DEMs."
+            "--threshold-area exige um SRC projetado; use --threshold-cells para DEMs geográficos."
         )
-    return reference_crs
+    return crs
 
 
 class DrainagePipeline:
@@ -200,45 +177,54 @@ class DrainagePipeline:
         self.config = config
         self.runner = runner
 
-    def execute(self) -> PipelineResult:
+    def execute(self) -> list[PipelineResult]:
         cfg = self.config
         cfg.validate()
         dem_files = discover_dems(cfg)
         if not dem_files:
             joined = ", ".join(cfg.patterns)
-            raise DrainageError(f"No DEM files matching {joined} found in {cfg.input_dir}.")
-
-        source_crs = validate_dem_stack(dem_files, cfg.threshold_units)
+            raise DrainageError(f"Nenhum arquivo DEM correspondente a {joined} foi encontrado em {cfg.input_dir}.")
 
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
-        work = cfg.output_dir.resolve()
-        mosaic = work / "dem_mosaic.tif"
-        breached = work / "dem_breached.tif"
-        pointer = work / "d8_pointer.tif"
-        accumulation = work / "flow_accumulation.tif"
-        streams = work / "streams.tif"
-        pruned_streams = work / "streams_pruned.tif"
-        hack_order = work / "hack_order.tif"
-        drainage = work / "drainage_hack_order.parquet"
-        manifest = work / "run_manifest.json"
+        results = []
+        for dem_file in dem_files:
+            try:
+                results.append(self._execute_tile(dem_file))
+            except EmptyDEMError as exc:
+                print(f"[ignorado] {exc}", flush=True)
+        if not results:
+            raise DrainageError("Nenhum arquivo DEM com dados de elevação utilizáveis foi encontrado.")
+        return results
 
-        hydrology_dem = self._create_mosaic(dem_files, mosaic)
-        self._tool(
-            "BreachDepressionsLeastCost",
-            breached,
-            [
-                f"--dem={hydrology_dem}",
-                f"--output={breached}",
-                f"--dist={cfg.breach_distance}",
-                *(
-                    [f"--max_cost={cfg.max_breach_cost}"]
-                    if cfg.max_breach_cost is not None
-                    else []
-                ),
-                *(["--min_dist"] if cfg.minimize_breach_distance else []),
-                *(["--fill"] if cfg.fill_remaining_depressions else []),
-            ],
-        )
+    def _execute_tile(self, dem_file: Path) -> PipelineResult:
+        cfg = self.config
+        source_crs = validate_dem(dem_file, cfg.threshold_units)
+        work = cfg.output_dir.resolve()
+        prefix = self._tile_prefix(dem_file)
+        output = lambda suffix: work / f"{prefix}_{suffix}"
+        breached = output("dem_breached.tif")
+        pointer = output("d8_pointer.tif")
+        accumulation = output("flow_accumulation.tif")
+        streams = output("streams.tif")
+        pruned_streams = output("streams_pruned.tif")
+        hack_order = output("hack_order.tif")
+        drainage = output("drainage_hack_order.parquet")
+        manifest = output("run_manifest.json")
+
+        processing_dem, temp_dir = self._prepare_dem(dem_file)
+        try:
+            self._tool(
+                "BreachDepressions",
+                breached,
+                [
+                    f"--dem={processing_dem}",
+                    f"--output={breached}",
+                    *(["--fill_pits"] if cfg.fill_remaining_depressions else []),
+                ],
+            )
+        finally:
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
         self._restore_raster_crs(breached, source_crs)
         self._tool(
             "D8Pointer",
@@ -311,54 +297,48 @@ class DrainagePipeline:
             flow_accumulation=accumulation,
             d8_pointer=pointer,
             breached_dem=breached,
-            mosaic=hydrology_dem,
+            source_dem=dem_file,
             manifest=manifest,
         )
         if not self.runner.dry_run:
-            self._write_manifest(result, dem_files, source_crs)
+            self._write_manifest(result, [dem_file], source_crs)
             if not cfg.keep_intermediates:
                 self._remove_intermediates(result)
         return result
 
+    def _tile_prefix(self, dem_file: Path) -> str:
+        relative = dem_file.resolve().relative_to(self.config.input_dir.resolve())
+        raw = "__".join(relative.with_suffix("").parts)
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
+
+    def _prepare_dem(self, dem_file: Path) -> tuple[Path, Path | None]:
+        if self.runner.dry_run:
+            return dem_file, None
+        with rasterio.open(dem_file) as dataset:
+            if dataset.nodata is not None or dataset.dtypes[0][0] not in "iu":
+                return dem_file, None
+            data = dataset.read(1)
+            valid = data != 0
+            if not valid.any():
+                raise EmptyDEMError(f"O arquivo DEM não contém dados de elevação: {dem_file}")
+            if valid.all():
+                return dem_file, None
+
+            dtype = np.dtype(dataset.dtypes[0])
+            nodata = np.iinfo(dtype).min if dtype.kind == "i" else 0
+            temp_dir = Path(tempfile.mkdtemp(prefix="dem-drainage-nodata-"))
+            prepared = temp_dir / dem_file.name
+            profile = dataset.profile.copy()
+            profile.update(nodata=nodata)
+            with rasterio.open(prepared, "w", **profile) as output:
+                output.write(np.where(valid, data, nodata), 1)
+        return prepared, temp_dir
+
     def _tool(self, tool: str, output: Path, arguments: Sequence[str]) -> None:
         if self.config.resume and output.exists():
-            print(f"[resume] keeping {output}", flush=True)
+            print(f"[retomar] mantendo {output}", flush=True)
             return
         self.runner.run(tool, arguments, cwd=self.config.output_dir.resolve())
-
-    def _create_mosaic(self, inputs: Sequence[Path], output: Path) -> Path:
-        if len(inputs) == 1:
-            return inputs[0]
-        if self.config.resume and output.exists():
-            print(f"[resume] keeping {output}", flush=True)
-            return output
-
-        print(f"[mosaic] merging {len(inputs)} DEM tiles into {output}", flush=True)
-        if self.runner.dry_run:
-            print(
-                f"[dry-run] rasterio merge ({self.config.mosaic_memory_mb} MiB limit)",
-                flush=True,
-            )
-            return output
-        try:
-            merge(
-                [str(path) for path in inputs],
-                dst_path=output,
-                resampling=rasterio.enums.Resampling.nearest,
-                target_aligned_pixels=True,
-                mem_limit=self.config.mosaic_memory_mb,
-                dst_kwds={
-                    "driver": "GTiff",
-                    "compress": "deflate",
-                    "tiled": True,
-                    "blockxsize": 256,
-                    "blockysize": 256,
-                    "BIGTIFF": "YES",
-                },
-            )
-        except (rasterio.errors.RasterioError, ValueError) as exc:
-            raise DrainageError(f"Unable to mosaic DEM tiles: {exc}") from exc
-        return output
 
     def _restore_raster_crs(self, path: Path, crs: CRS) -> None:
         if self.runner.dry_run or not path.exists():
@@ -367,7 +347,7 @@ class DrainagePipeline:
             with rasterio.open(path, "r+") as dataset:
                 dataset.crs = crs
         except rasterio.errors.RasterioError as exc:
-            raise DrainageError(f"Unable to restore CRS on {path}: {exc}") from exc
+                raise DrainageError(f"Não foi possível restaurar o SRC em {path}: {exc}") from exc
 
     def _write_manifest(
         self, result: PipelineResult, inputs: Sequence[Path], source_crs: CRS
@@ -384,22 +364,19 @@ class DrainagePipeline:
             "config": config_data,
             "outputs": {key: str(value) for key, value in asdict(result).items()},
             "hierarchy": {
-                "method": "Hack stream order",
+                "method": "ordem de canais Hack",
                 "vector_field": "hack_order",
-                "meaning": "1=main drainage; 2=direct tributaries; 3+=successive tributary levels",
+                "meaning": "1=drenagem principal; 2=tributários diretos; 3+=níveis sucessivos de tributários",
             },
         }
         result.manifest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     def _remove_intermediates(self, result: PipelineResult) -> None:
-        for name in (
-            "dem_mosaic.tif",
-            "dem_breached.tif",
-            "d8_pointer.tif",
-            "flow_accumulation.tif",
-            "streams.tif",
-            "streams_pruned.tif",
+        for path in (
+            result.breached_dem,
+            result.d8_pointer,
+            result.flow_accumulation,
+            result.streams_raster,
         ):
-            path = self.config.output_dir / name
             if path.resolve().is_relative_to(self.config.output_dir.resolve()):
                 path.unlink(missing_ok=True)

@@ -1,23 +1,24 @@
 import type { Metadata } from "next";
-import { DM_Serif_Display, Manrope } from "next/font/google";
+import { Montserrat, Roboto } from "next/font/google";
 import "./globals.css";
 import "leaflet/dist/leaflet.css";
 
-const manrope = Manrope({
+const roboto = Roboto({
   variable: "--font-manrope",
   subsets: ["latin"],
+  weight: ["400", "500", "700"],
 });
 
-const display = DM_Serif_Display({
+const display = Montserrat({
   variable: "--font-display",
   subsets: ["latin"],
-  weight: "400",
+  weight: ["500", "600", "700"],
 });
 
 export const metadata: Metadata = {
-  title: "Drainage Studio — DEM network extraction",
+  title: "Dossel Ambiental — Estúdio de Drenagem",
   description:
-    "Extract and explore Hack-ordered drainage networks from DEM folders with WhiteboxTools.",
+    "Extraia e explore redes de drenagem ordenadas por Hack a partir de pastas DEM com WhiteboxTools.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
@@ -30,8 +31,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${manrope.variable} ${display.variable}`}>
+    <html lang="pt-BR">
+      <body className={`${roboto.variable} ${display.variable}`}>
         {children}
       </body>
     </html>

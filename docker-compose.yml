@@ -4,19 +4,19 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: dem-drainage-backend
-    restart: unless-stopped
+    restart: "no"
     ports:
-      - "8000:8000"
+      - "${DEM_DRAINAGE_BACKEND_PORT:-8055}:8055"
     environment:
       - DEM_DRAINAGE_HOST=0.0.0.0
-      - DEM_DRAINAGE_PORT=8000
+      - DEM_DRAINAGE_PORT=8055
       - DEM_DRAINAGE_JOB_DIR=/data/jobs
-      - DEM_DRAINAGE_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://0.0.0.0:3000,*
+      - DEM_DRAINAGE_CORS_ORIGINS=${DEM_DRAINAGE_CORS_ORIGINS:-http://localhost:3055,http://127.0.0.1:3055,http://0.0.0.0:3055,http://localhost:3000,*}
     volumes:
       - dem_jobs:/data/jobs
       - ./data:/data/local
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8055/api/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -27,14 +27,14 @@ services:
       context: ./web
       dockerfile: Dockerfile
       args:
-        - NEXT_PUBLIC_API_URL=http://localhost:8000
+        - NEXT_PUBLIC_API_URL=${DEM_DRAINAGE_API_URL:-http://localhost:8055}
     container_name: dem-drainage-frontend
-    restart: unless-stopped
+    restart: "no"
     ports:
-      - "3000:3000"
+      - "${DEM_DRAINAGE_FRONTEND_PORT:-3055}:3055"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-      - PORT=3000
+      - NEXT_PUBLIC_API_URL=${DEM_DRAINAGE_API_URL:-http://localhost:8055}
+      - PORT=3055
     depends_on:
       backend:
         condition: service_healthy

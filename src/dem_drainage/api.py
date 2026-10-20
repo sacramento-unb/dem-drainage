@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import uuid
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from PIL import Image
 from rasterio.enums import Resampling
 from rasterio.warp import transform_bounds
+from starlette.background import BackgroundTask
 
 from .pipeline import DrainageConfig, DrainagePipeline, WhiteboxRunner
 
@@ -31,7 +33,7 @@ class Job:
     input_dir: Path
     output_dir: Path
     status: str = "queued"
-    stage: str = "Waiting to start"
+    stage: str = "Aguardando início"
     progress: int = 0
     file_count: int = 0
     total_bytes: int = 0
@@ -69,15 +71,23 @@ _cors_env = os.environ.get("DEM_DRAINAGE_CORS_ORIGINS", "").strip()
 _allowed_origins = (
     [origin.strip() for origin in _cors_env.split(",") if origin.strip()]
     if _cors_env
-    else ["http://localhost:3000", "http://127.0.0.1:3000", "http://0.0.0.0:3000", "*"]
+    else [
+        "http://localhost:3055",
+        "http://127.0.0.1:3055",
+        "http://0.0.0.0:3055",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://0.0.0.0:3000",
+        "*",
+    ]
 )
 
-app = FastAPI(title="DEM Drainage Studio API", version="0.2.0")
+app = FastAPI(title="API do Estúdio de Drenagem DEM", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -104,17 +114,16 @@ async def create_job(
     files: list[UploadFile] = File(...),
     threshold: float = Form(10_000),
     threshold_units: str = Form("cells"),
-    breach_distance: int = Form(100),
     min_stream_length: float | None = Form(None),
 ) -> dict[str, Any]:
-    if threshold <= 0 or breach_distance <= 0:
-        raise HTTPException(400, "Threshold and breach distance must be positive.")
+    if threshold <= 0:
+        raise HTTPException(400, "O limiar deve ser maior que zero.")
     if threshold_units not in {"cells", "area"}:
-        raise HTTPException(400, "Threshold units must be cells or area.")
+        raise HTTPException(400, "Escolha células ou área como unidade do limiar.")
     if _whitebox_executable() is None:
         raise HTTPException(
             503,
-            "WhiteboxTools was not found. Set WHITEBOX_TOOLS_EXE before starting the API.",
+            "Não foi possível localizar o WhiteboxTools. Configure WHITEBOX_TOOLS_EXE antes de iniciar a API.",
         )
 
     job_id = uuid.uuid4().hex[:12]
@@ -132,7 +141,7 @@ async def create_job(
             if Path(name).suffix.lower() not in {".tif", ".tiff"}:
                 continue
             if not name or name in used_names:
-                raise HTTPException(400, f"Duplicate or invalid DEM filename: {name}")
+                raise HTTPException(400, f"Há um nome de arquivo DEM duplicado ou inválido: {name}")
             used_names.add(name)
             destination = input_dir / name
             with destination.open("wb") as sink:
@@ -149,7 +158,7 @@ async def create_job(
             await upload.close()
 
     if accepted == 0:
-        raise HTTPException(400, "The selected folder contains no GeoTIFF DEM files.")
+        raise HTTPException(400, "A pasta selecionada não contém arquivos GeoTIFF de elevação.")
 
     job = Job(
         id=job_id,
@@ -163,7 +172,7 @@ async def create_job(
 
     thread = threading.Thread(
         target=_run_job,
-        args=(job, threshold, threshold_units, breach_distance, min_stream_length),
+        args=(job, threshold, threshold_units, min_stream_length),
         daemon=True,
         name=f"drainage-{job_id}",
     )
@@ -181,17 +190,16 @@ def _run_job(
     job: Job,
     threshold: float,
     threshold_units: str,
-    breach_distance: int,
     min_stream_length: float | None,
 ) -> None:
     stages = {
-        "BreachDepressionsLeastCost": (18, "Breaching depressions"),
-        "D8Pointer": (34, "Calculating flow direction"),
-        "D8FlowAccumulation": (49, "Accumulating upstream flow"),
-        "ExtractStreams": (66, "Extracting drainage cells"),
-        "RemoveShortStreams": (75, "Pruning short tributaries"),
-        "HackStreamOrder": (84, "Ordering the network"),
-        "StreamsToGeoParquet": (94, "Writing GeoParquet"),
+        "BreachDepressions": (18, "Corrigindo as depressões do terreno"),
+        "D8Pointer": (34, "Calculando a direção do fluxo"),
+        "D8FlowAccumulation": (49, "Calculando a acumulação do fluxo"),
+        "ExtractStreams": (66, "Extraindo a rede de drenagem"),
+        "RemoveShortStreams": (75, "Filtrando tributários curtos"),
+        "HackStreamOrder": (84, "Calculando a ordem da rede"),
+        "StreamsToGeoParquet": (94, "Gravando GeoParquet"),
     }
 
     def stage_started(tool: str) -> None:
@@ -200,13 +208,12 @@ def _run_job(
 
     try:
         executable = WhiteboxRunner.discover()
-        _update_job(job, status="processing", stage="Validating DEM tiles", progress=5)
+        _update_job(job, status="processing", stage="Validando arquivos DEM", progress=5)
         config = DrainageConfig(
             input_dir=job.input_dir,
             output_dir=job.output_dir,
             threshold=threshold,
             threshold_units=threshold_units,
-            breach_distance=breach_distance,
             min_stream_length=min_stream_length,
             keep_intermediates=True,
         )
@@ -217,7 +224,7 @@ def _run_job(
         _update_job(
             job,
             status="complete",
-            stage="Ready to explore",
+            stage="Processamento concluído",
             progress=100,
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -225,7 +232,7 @@ def _run_job(
         _update_job(
             job,
             status="failed",
-            stage="Processing failed",
+            stage="Falha no processamento",
             error=str(exc),
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -235,13 +242,114 @@ def _get_job(job_id: str) -> Job:
     with _jobs_lock:
         job = _jobs.get(job_id)
     if job is None:
-        raise HTTPException(404, "Job not found.")
+        raise HTTPException(404, "Processamento não encontrado.")
     return job
 
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
     return _get_job(job_id).public()
+
+
+@app.get("/api/files")
+def list_output_files() -> dict[str, Any]:
+    files = []
+    if _job_root.is_dir():
+        for output_dir in _job_root.glob("*/output"):
+            if not output_dir.is_dir():
+                continue
+            job_id = output_dir.parent.name
+            for path in output_dir.iterdir():
+                if not path.is_file():
+                    continue
+                modified_at = datetime.fromtimestamp(
+                    path.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
+                files.append(
+                    {
+                        "job_id": job_id,
+                        "name": path.name,
+                        "kind": (
+                            "raster"
+                            if path.suffix.lower() in {".tif", ".tiff"}
+                            else "vector"
+                            if path.suffix.lower() == ".parquet"
+                            else "metadata"
+                        ),
+                        "size": path.stat().st_size,
+                        "modified_at": modified_at,
+                        "download_url": f"/api/files/{job_id}/{path.name}",
+                    }
+                )
+    files.sort(key=lambda item: item["modified_at"], reverse=True)
+    return {"root": str(_job_root), "files": files}
+
+
+def _output_file_path(job_id: str, name: str) -> Path:
+    if not job_id or Path(job_id).name != job_id or not name or Path(name).name != name:
+        raise HTTPException(400, "Nome de arquivo de saída inválido.")
+    output_dir = (_job_root / job_id / "output").resolve()
+    path = (output_dir / name).resolve()
+    if path.parent != output_dir or not path.is_file():
+        raise HTTPException(404, "Arquivo de saída não encontrado.")
+    return path
+
+
+@app.get("/api/files/{job_id}/{name}")
+def download_output_file(job_id: str, name: str) -> FileResponse:
+    path = _output_file_path(job_id, name)
+    return FileResponse(path, filename=path.name)
+
+
+@app.delete("/api/files/{job_id}/{name}")
+def delete_output_file(job_id: str, name: str) -> dict[str, str]:
+    job = _jobs.get(job_id)
+    if job and job.status in {"queued", "processing"}:
+        raise HTTPException(409, "Não é possível excluir arquivos de um processamento em andamento.")
+    path = _output_file_path(job_id, name)
+    path.unlink()
+    return {"deleted": path.name}
+
+
+@app.post("/api/files/bulk-delete")
+def bulk_delete_output_files(payload: dict[str, Any]) -> dict[str, Any]:
+    file_items = payload.get("files", [])
+    if not isinstance(file_items, list):
+        raise HTTPException(400, "Formato de requisição inválido. Esperada lista de arquivos.")
+
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    for item in file_items:
+        if not isinstance(item, dict):
+            continue
+        job_id = str(item.get("job_id", "")).strip()
+        name = str(item.get("name", "")).strip()
+        if not job_id or not name:
+            continue
+
+        job = _jobs.get(job_id)
+        if job and job.status in {"queued", "processing"}:
+            errors.append(
+                {
+                    "job_id": job_id,
+                    "name": name,
+                    "error": "Processamento em andamento",
+                }
+            )
+            continue
+
+        try:
+            path = _output_file_path(job_id, name)
+            path.unlink(missing_ok=True)
+            deleted.append(f"{job_id}/{name}")
+        except HTTPException as exc:
+            errors.append({"job_id": job_id, "name": name, "error": exc.detail})
+        except Exception as exc:
+            errors.append({"job_id": job_id, "name": name, "error": str(exc)})
+
+    return {"deleted_count": len(deleted), "deleted": deleted, "errors": errors}
+
 
 
 def _artifacts(job: Job) -> list[dict[str, Any]]:
@@ -276,10 +384,10 @@ def _artifacts(job: Job) -> list[dict[str, Any]]:
 
 def _artifact_path(job: Job, name: str) -> Path:
     if not name or Path(name).name != name:
-        raise HTTPException(400, "Invalid artifact name.")
+        raise HTTPException(400, "Nome de resultado inválido.")
     path = (job.output_dir / name).resolve()
     if path.parent != job.output_dir.resolve() or not path.is_file():
-        raise HTTPException(404, "Artifact not found.")
+        raise HTTPException(404, "Resultado não encontrado.")
     return path
 
 
@@ -287,6 +395,26 @@ def _artifact_path(job: Job, name: str) -> Path:
 def download_artifact(job_id: str, name: str) -> FileResponse:
     path = _artifact_path(_get_job(job_id), name)
     return FileResponse(path, filename=path.name)
+
+
+@app.get("/api/jobs/{job_id}/geoparquets.zip")
+def download_geoparquets(job_id: str) -> FileResponse:
+    job = _get_job(job_id)
+    paths = sorted(job.output_dir.glob("*.parquet"))
+    if not paths:
+        raise HTTPException(404, "Nenhum arquivo GeoParquet foi gerado para este processamento.")
+
+    archive = tempfile.NamedTemporaryFile(prefix=f"{job.id}-", suffix=".zip", delete=False)
+    archive.close()
+    with zipfile.ZipFile(archive.name, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for path in paths:
+            bundle.write(path, arcname=path.name)
+    return FileResponse(
+        archive.name,
+        media_type="application/zip",
+        filename=f"{job.id}_geoparquets.zip",
+        background=BackgroundTask(Path(archive.name).unlink, missing_ok=True),
+    )
 
 
 def _wgs84_bounds(path: Path) -> list[list[float]]:
@@ -298,7 +426,7 @@ def _wgs84_bounds(path: Path) -> list[list[float]]:
     else:
         with rasterio.open(path) as dataset:
             if dataset.crs is None:
-                raise HTTPException(422, "Artifact has no CRS.")
+                raise HTTPException(422, "O resultado não possui SRC.")
             bounds = transform_bounds(dataset.crs, "EPSG:4326", *dataset.bounds)
     left, bottom, right, top = [float(value) for value in bounds]
     return [[bottom, left], [top, right]]
@@ -309,7 +437,7 @@ def preview_info(job_id: str, name: str) -> dict[str, Any]:
     path = _artifact_path(_get_job(job_id), name)
     suffix = path.suffix.lower()
     if suffix not in {".tif", ".tiff", ".parquet"}:
-        raise HTTPException(415, "This artifact cannot be visualized.")
+        raise HTTPException(415, "Este arquivo não pode ser visualizado.")
     return {
         "name": path.name,
         "kind": "vector" if suffix == ".parquet" else "raster",
@@ -325,7 +453,7 @@ def preview(job_id: str, name: str) -> Response:
         return JSONResponse(_geoparquet_preview(path))
     if path.suffix.lower() in {".tif", ".tiff"}:
         return Response(_raster_preview(path), media_type="image/png")
-    raise HTTPException(415, "This artifact cannot be visualized.")
+    raise HTTPException(415, "Este resultado não pode ser visualizado.")
 
 
 def _geoparquet_preview(path: Path, limit: int = 50_000) -> dict[str, Any]:
@@ -336,7 +464,7 @@ def _geoparquet_preview(path: Path, limit: int = 50_000) -> dict[str, Any]:
     if total > limit:
         frame = frame.iloc[:limit]
     if frame.crs is None:
-        raise HTTPException(422, "GeoParquet has no CRS metadata.")
+        raise HTTPException(422, "Este GeoParquet não possui metadados de SRC.")
     frame = frame.to_crs(4326)
     collection = json.loads(frame.to_json(drop_id=True))
     collection["preview"] = {"shown": len(frame), "total": total}
@@ -407,7 +535,7 @@ def main() -> None:
     uvicorn.run(
         "dem_drainage.api:app",
         host=os.environ.get("DEM_DRAINAGE_HOST", "127.0.0.1"),
-        port=int(os.environ.get("DEM_DRAINAGE_PORT", "8000")),
+        port=int(os.environ.get("DEM_DRAINAGE_PORT", "8055")),
         reload=False,
     )
 

@@ -10,10 +10,10 @@ from shapely.geometry import LineString
 
 
 class VectorizationError(RuntimeError):
-    """Raised when ordered stream rasters cannot be converted to GeoParquet."""
+    """Erro quando rasters de canais ordenados não podem virar GeoParquet."""
 
 
-# WhiteboxTools native D8 pointer convention (clockwise from North-East):
+# Convenção nativa do ponteiro D8 do WhiteboxTools (sentido horário a partir do nordeste):
 # 128: North (-1, 0)
 # 1: North-East (-1, 1)
 # 2: East (0, 1)
@@ -47,25 +47,25 @@ def _shift_slices(
 def streams_to_geoparquet(
     ordered_streams: Path, d8_pointer: Path, output: Path
 ) -> int:
-    """Convert Hack-ordered D8 streams directly to GeoParquet.
+    """Converte canais D8 ordenados por Hack diretamente para GeoParquet.
 
-    Link splitting follows the stream topology directly and writes GeoParquet
-    without creating an intermediary vector format.
+    Divide os trechos seguindo diretamente a topologia dos canais e grava
+    GeoParquet sem criar um formato vetorial intermediário.
     """
     try:
         with rasterio.open(ordered_streams) as stream_src, rasterio.open(
             d8_pointer
         ) as pointer_src:
             if stream_src.shape != pointer_src.shape:
-                raise VectorizationError("Stream and D8 pointer rasters do not align.")
+                raise VectorizationError("Os rasters de canais e direção D8 não estão alinhados.")
             if stream_src.transform != pointer_src.transform:
-                raise VectorizationError("Stream and D8 pointer transforms differ.")
+                raise VectorizationError("As transformações dos rasters de canais e direção D8 são diferentes.")
             streams = stream_src.read(1)
             pointer = pointer_src.read(1)
             transform = stream_src.transform
             crs = stream_src.crs
     except rasterio.errors.RasterioError as exc:
-        raise VectorizationError(f"Unable to read ordered stream rasters: {exc}") from exc
+        raise VectorizationError(f"Não foi possível ler os rasters de canais ordenados: {exc}") from exc
 
     stream_mask = np.isfinite(streams) & (streams > 0)
     rows, cols = streams.shape
