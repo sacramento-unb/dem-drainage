@@ -135,3 +135,19 @@ A vetorização direta do GeoParquet atualmente carrega em memória os rasters d
 python -m pip install -e '.[test]'
 pytest
 ```
+
+## Audit status and limits
+
+The package metadata names DigiFarmz as the author. Confirm ownership and
+permission to present this repository as personal portfolio work before any
+publication. The local audit found no dataset fixture and did not run Docker,
+WhiteboxTools or the web application.
+
+The API accepts uploaded files without an explicit size quota, keeps job state
+in process memory and defaults its CORS origin list to include `*` for local
+convenience. Restrict `DEM_DRAINAGE_CORS_ORIGINS`, add authentication and set
+resource/time limits before exposing it beyond a trusted local network.
+
+On 2026-10-20, source compilation and `git diff --check` passed. The optional
+test command could not run because `pytest` is not installed in the audit
+environment; no remote operation was performed.
