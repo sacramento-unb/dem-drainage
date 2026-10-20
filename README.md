@@ -138,9 +138,8 @@ pytest
 
 ## Audit status and limits
 
-The package metadata names DigiFarmz as the author. Confirm ownership and
-permission to present this repository as personal portfolio work before any
-publication. The local audit found no dataset fixture and did not run Docker,
+This is a personal project by Vitor Sacramento; no corporate attribution is
+claimed. The local audit found no dataset fixture and did not run Docker,
 WhiteboxTools or the web application.
 
 The API accepts uploaded files without an explicit size quota, keeps job state
@@ -150,4 +149,4 @@ resource/time limits before exposing it beyond a trusted local network.
 
 On 2026-10-20, source compilation and `git diff --check` passed. The optional
 test command could not run because `pytest` is not installed in the audit
-environment; no remote operation was performed.
+environment. Attribution metadata was corrected in commit `e75838c`.
