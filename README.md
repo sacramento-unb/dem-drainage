@@ -138,9 +138,8 @@ pytest
 
 ## Audit status and limits
 
-This is a personal project by Vitor Sacramento; no corporate attribution is
-claimed. The local audit found no dataset fixture and did not run Docker,
-WhiteboxTools or the web application.
+This is a personal project by Vitor Sacramento. The local audit found no
+dataset fixture and did not run Docker, WhiteboxTools or the web application.
 
 The API accepts uploaded files without an explicit size quota, keeps job state
 in process memory and defaults its CORS origin list to include `*` for local
